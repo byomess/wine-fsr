@@ -9,6 +9,14 @@ CONFIG_FILE="$HOME/.config/${PROG_NAME}/${PROG_NAME}.conf"
 PER_GAME_CONFIG_FILE_PATH="$HOME/.config/${PROG_NAME}/"
 PER_GAME_CONFIG_FILES="$HOME/.config/${PROG_NAME}/*"
 
+WINE_BIN="$(command -v wine)"
+MANGOHUD_BIN="$(command -v mangohud)"
+GAMEMODE_BIN="$(command -v gamemoderun)"
+
+_envs=("$FSR_ENABLE")
+_gamemode=false
+_mangohud=false
+
 for _config in $(basename ${PER_GAME_CONFIG_FILES} | cut -d'.' -f1); do
 	if [[ "$@" == *"$_config"* ]]; then
 		game_config_match="${PER_GAME_CONFIG_FILE_PATH}/${_config}.conf"
@@ -17,24 +25,76 @@ for _config in $(basename ${PER_GAME_CONFIG_FILES} | cut -d'.' -f1); do
 	fi
 done
 
-set_config_file_opts(){
+set_config_file_opts() {
 	_strength="${STRENGTH_PREFIX}=$FSR_STRENGTH"
-	_cmd="${MODE_PREFIX}=$FSR_RESOLUTION"
-	if ! [ -z $CUSTOM_FSR_RESOLUTION ];then
-		_cmd="${CUSTOM_MODE_PREFIX}=$CUSTOM_FSR_RESOLUTION"
+	_envs+=("${MODE_PREFIX}=$FSR_RESOLUTION")
+	if ! [ -z $CUSTOM_FSR_RESOLUTION ]; then
+		_envs+=("${CUSTOM_MODE_PREFIX}=$CUSTOM_FSR_RESOLUTION")
 	fi
 }
 
-if ! [ -z $game_config_match ];then
+if ! [ -z $game_config_match ]; then
 	source $game_config_match
 	set_config_file_opts
-elif  [ -f $CONFIG_FILE ];then
+elif [ -f $CONFIG_FILE ]; then
 	source $CONFIG_FILE
 	set_config_file_opts
 fi
 
-get_resolution() {
+check_dependencies() {
+	dependencies=()
 
+	for ((i = 1; i <= $#; i++)); do
+		if [[ "${!i}" == *","* ]]; then
+			IFS=',' read -r dep bin <<<"${!i}"
+			if ! command -v "$bin" &>/dev/null; then
+				dependencies+=("$dep")
+			fi
+		else
+			if ! command -v "${!i}" &>/dev/null; then
+				dependencies+=("${!i}")
+			fi
+		fi
+	done
+
+	install_dependency() {
+		printf '%s can be installed using \e[1m%s\e[0m. Do you want to install it? y/\e[1mN\e[0m: ' "$1" "$2"
+		read _yn
+		[[ $_yn == "y" ]] && eval "$3"
+	}
+
+	for dep in "${dependencies[@]}"; do
+		if ! command -v "$dep" &>/dev/null; then
+			echo -e "\e[1;31m$dep\e[0m is required to run this script."
+
+			if command -v apt &>/dev/null; then
+				install_dependency "$dep" "apt" "sudo apt update && sudo apt install -y $dep"
+			elif command -v dnf &>/dev/null; then
+				install_dependency "$dep" "dnf" "sudo dnf install -y $dep"
+			elif command -v pacman &>/dev/null; then
+				install_dependency "$dep" "pacman" "sudo pacman -Sy $dep"
+			elif command -v zypper &>/dev/null; then
+				install_dependency "$dep" "zypper" "sudo zypper install -y $dep"
+			elif command -v yum &>/dev/null; then
+				install_dependency "$dep" "yum" "sudo yum install -y $dep"
+			else
+				printf 'Open installation guide for %s? \e[3;34m\e]8;;https://www.gnu.org/software/%s\e\\%s\e]8;;\e\\\e[0m y/\e[1mN\e[0m: ' "$dep" "$dep" "$dep"
+				read _yn
+				[[ $_yn == "y" ]] && xdg-open "https://www.gnu.org/software/$dep" && exit 1
+				exit 1
+			fi
+
+			if ! command -v "$dep" &>/dev/null; then
+				echo -e "\e[1;31mFailed to install $dep. Please install it manually.\e[0m"
+				exit 1
+			fi
+		fi
+	done
+
+	[[ ${#dependencies[@]} -gt 0 ]] && exec $0 "$@"
+}
+
+get_resolution() {
 	native_res=$(cat /sys/class/drm/*/modes | head -n1)
 	native_width=$(echo $native_res | cut -d'x' -f1)
 	native_height=$(echo $native_res | cut -d'x' -f2)
@@ -47,20 +107,22 @@ get_resolution() {
 	balanced_scale_h=$(echo "$native_height/1.7" | bc)
 	performance_scale_w=$(echo "$native_width/2" | bc)
 	performance_scale_h=$(echo "$native_height/2" | bc)
-
-
 }
 
-show_help(){
-  get_resolution
-  echo "Usage: $PROG_NAME [OPTION]...
+show_help() {
+	get_resolution
+	echo "Usage: $PROG_NAME [OPTION]...
 Resolution options for AMD FSR:
   -h, --help		Show help message
   -u, --ultra		Ultra Quality, 1.3x scale: (${ultra_scale_w}x${ultra_scale_h})
   -q, --quality		Quality, 1.5x scale: (${quality_scale_w}x${quality_scale_h})
   -b, --balanced	Balanced, 1.7x scale: (${balanced_scale_w}x${balanced_scale_h})
   -p, --performance	Performance, 2x scale: (${performance_scale_w}x${performance_scale_h})
-  -c, --custom		Set custom resolution mode.
+  -c, --custom		Set custom resolution mode
+  -w, --wine-bin	Set custom wine binary path (default: $WINE_BIN)
+
+Other options:
+  -i, --info		Show native device resolution and the available FSR resolutions
 
 Sharpness options for AMD FSR:
   0, Sharpest
@@ -71,39 +133,104 @@ Sharpness options for AMD FSR:
   5, Softest"
 }
 
+show_info() {
+	get_resolution
+	echo -e "Native resolution:\t" $native_res
+	echo ""
+	echo -e "Ultra scale:\t\t" $ultra_scale_w"x"$ultra_scale_h
+	echo -e "Quality scale:\t\t" $quality_scale_w"x"$quality_scale_h
+	echo -e "Balanced scale:\t\t" $balanced_scale_w"x"$balanced_scale_h
+	echo -e "Performance scale:\t" $performance_scale_w"x"$performance_scale_h
+}
 
-case "$1" in
-	"-q"|"--quality") _cmd="${MODE_PREFIX}=quality"; shift 1;;
-	"-b"|"--balanced") _cmd="${MODE_PREFIX}=balanced"; shift 1;;
-	"-p"|"--performance") _cmd="${MODE_PREFIX}=performance"; shift 1;;
-	"-u"|"--ultra") _cmd="${MODE_PREFIX}=ultra"; shift 1;;
-	"-c"|"--custom") _cmd=${CUSTOM_MODE_PREFIX}="$2"; shift 2;;
-	"-c="*|"--custom="*) _cmd=${CUSTOM_MODE_PREFIX}="${1//[-custom=]/}"; shift 1;;
-	"-h"|"--help") show_help; exit ;;
-esac
+check_dependencies "wine" "bc"
 
-case "$1" in
-	"5") _strength="${STRENGTH_PREFIX}=5"; shift 1;;
-	"4") _strength="${STRENGTH_PREFIX}=4"; shift 1;;
-	"3") _strength="${STRENGTH_PREFIX}=3"; shift 1;;
-	"1") _strength="${STRENGTH_PREFIX}=1"; shift 1;;
-	"0") _strength="${STRENGTH_PREFIX}=0"; shift 1;;
-	  *) [ -z $_strength ] && _strength="${STRENGTH_PREFIX}=2";;
-esac
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	"-q" | "--quality")
+		_envs+=("${MODE_PREFIX}=quality")
+		shift
+		;;
+	"-b" | "--balanced")
+		_envs+=("${MODE_PREFIX}=balanced")
+		shift
+		;;
+	"-p" | "--performance")
+		_envs+=("${MODE_PREFIX}=performance")
+		shift
+		;;
+	"-u" | "--ultra")
+		_envs+=("${MODE_PREFIX}=ultra")
+		shift
+		;;
+	"-c" | "--custom")
+		_envs+=("${CUSTOM_MODE_PREFIX}=$2")
+		shift 2
+		;;
+	"-w" | "--wine-bin")
+		WINE_BIN="$2"
+		shift 2
+		;;
+	"-g" | "--gamemode")
+		check_dependencies "gamemode,gamemoderun"
+		_gamemode=true
+		shift
+		;;
+	"-m" | "--mangohud")
+		check_dependencies "mangohud"
+		_mangohud=true
+		shift
+		;;
+	"-d" | "--dxvk-hud")
+		_envs+=("DXVK_HUD=1")
+		shift
+		;;
+	"-i" | "--info")
+		show_info
+		exit
+		;;
+	"-h" | "--help")
+		show_help
+		exit
+		;;
+	"0" | "1" | "2" | "3" | "4" | "5")
+		_strength="${STRENGTH_PREFIX}=$1"
+		shift
+		;;
+	*)
+		break
+		;;
+	esac
+done
 
-
-
-run_error() { echo "Invalid option -- '$inv_cmd'"; show_help; exit 1; }
-
-if ! command -v $1 &> /dev/null || [[ "$PROG_NAME" = "$1" ]]; then
-	inv_cmd=$1
-	run_error
+if [[ -z "$1" ]]; then
+	echo "Error: No program specified."
+	show_help
+	exit 1
 fi
 
-export $_cmd 
-export $_strength
-export $FSR_ENABLE
-echo "$_cmd
-$_strength
-$FSR_ENABLE"
-exec "$@"
+exec_env="$_strength"
+for _env in "${_envs[@]}"; do
+	export $_env
+	exec_env="$exec_env $_env"
+done
+
+exec_bins=()
+if [ $_mangohud == true ]; then
+	exec_bins+=("$MANGOHUD_BIN")
+fi
+if [ $_gamemode == true ]; then
+	exec_bins+=("$GAMEMODE_BIN")
+fi
+
+exec_bins+=("$WINE_BIN")
+
+exec_str=""
+for _bin in "${exec_bins[@]}"; do
+	exec_str="$exec_str $_bin"
+done
+
+_cmd="$exec_env $exec_str \"$@\""
+
+echo $_cmd
+eval $_cmd
